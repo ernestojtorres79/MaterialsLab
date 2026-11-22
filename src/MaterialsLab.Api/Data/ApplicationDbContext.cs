@@ -16,8 +16,15 @@ public class ApplicationDbContext : IdentityDbContext<AppUser, AppRole, Guid>
         base.OnModelCreating(builder);
         builder.Entity<Project>(e =>
         {
-            e.Property(p => p.Code).IsRequired().HasMaxLength(15);
+            e.Property(p => p.Code).HasMaxLength(15);
             e.HasIndex(p => p.Code).IsUnique();
+            e.Property(p => p.Name).HasMaxLength(150);
+        });
+        builder.Entity<MixDesign>(e =>
+        {
+            e.Property(m => m.Code).HasMaxLength(15);
+            e.HasIndex(m => m.Code).IsUnique();
+            e.Property(m => m.Description).HasMaxLength(250);
         });
     }
 
