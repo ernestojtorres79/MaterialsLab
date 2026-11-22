@@ -1,0 +1,5 @@
+@MaterialsLab.Api_HostAddress = http://localhost:5049
+
+GET {{MaterialsLab.Api_HostAddress}}/openapi/v1.json
+Accept: application/json
+
