@@ -14,6 +14,13 @@ public class ApplicationDbContext : IdentityDbContext<AppUser, AppRole, Guid>
     protected override void OnModelCreating(ModelBuilder builder)
     {
         base.OnModelCreating(builder);
+        builder.Entity<AppUser>(e =>
+        {
+            e.Property(u => u.FirstName).HasMaxLength(100);
+            e.Property(u => u.LastName).HasMaxLength(100);
+            e.Property(u => u.MiddleName).HasMaxLength(100);
+        });
+        builder.Entity<AppRole>(e => e.Property(r => r.Description).HasMaxLength(250));
         builder.Entity<Project>(e =>
         {
             e.Property(p => p.Code).HasMaxLength(15);
@@ -49,8 +56,6 @@ public class ApplicationDbContext : IdentityDbContext<AppUser, AppRole, Guid>
         {
             e.Property(sp => sp.DiameterIn).HasPrecision(9, 3);
             e.Property(sp => sp.MaxLoadLbf).HasPrecision(12, 1);
-            e.Property(sp => sp.TestedAt).HasPrecision(12, 1);
-            e.Property(sp => sp.StrengthPsi).HasPrecision(10, 0);
             e.HasOne(sp => sp.Sample)
                 .WithMany(sp => sp.Specimens)
                 .HasForeignKey(sp => sp.SampleId)
