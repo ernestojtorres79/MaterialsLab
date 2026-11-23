@@ -16,7 +16,7 @@ namespace MaterialsLab.Api.Controllers;
 public class SamplesController(ApplicationDbContext context) : ControllerBase
 {
     private Guid CurrentUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
-    private bool IsOnlyTechnician() => User.IsInRole("Technician") && !User.IsInRole("Admin") && !User.IsInRole("Reviewer");
+    private bool IsOnlyTechnician() => User.IsInRole(Roles.Technician) && !User.IsInRole(Roles.Admin) && !User.IsInRole(Roles.Reviewer);
     private Task<bool> IsAssignedAsync(Guid projectId, Guid userId) => context.ProjectTechnicians.AnyAsync(pt => pt.ProjectId == projectId && pt.TechnicianId == userId);
     private Task<Sample?> LoadSampleAsync(Guid id) => context.Samples.Include(s => s.Specimens).FirstOrDefaultAsync(s => s.Id == id);
 
@@ -249,5 +249,32 @@ public class SamplesController(ApplicationDbContext context) : ControllerBase
         sample.Status = newStatus;
         await context.SaveChangesAsync();
         return ToDto(sample);
+    }
+
+    // Technician Samples from projects
+    [HttpGet]
+    public async Task<ActionResult<List<SampleDto>>> GetAll(
+        [FromQuery] Guid? projectId,
+        [FromQuery] Guid? mixDesignId,
+        [FromQuery] SampleStatus? status,
+        [FromQuery] DateTimeOffset? sampledFrom,
+        [FromQuery] DateTimeOffset? sampledTo
+    )
+    {
+        var query = context.Samples.Include(s => s.Specimens).AsQueryable();
+        if (IsOnlyTechnician())
+        {
+            var userId = CurrentUserId();
+            query = query.Where(s => s.Project.ProjectTechnicians.Any(pt => pt.TechnicianId == userId));
+        }
+
+        if (projectId.HasValue)   query = query.Where(s => s.ProjectId == projectId);
+        if (mixDesignId.HasValue) query = query.Where(s => s.MixDesignId == mixDesignId);
+        if (status.HasValue)      query = query.Where(s => s.Status == status);
+        if (sampledFrom.HasValue) query = query.Where(s => s.SampledAt >= sampledFrom);
+        if (sampledTo.HasValue)   query = query.Where(s => s.SampledAt <= sampledTo);
+
+        var samples = await query.OrderByDescending(s => s.SampledAt).ToListAsync();
+        return samples.Select(ToDto).ToList();
     }
 }
