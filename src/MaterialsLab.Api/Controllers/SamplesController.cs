@@ -18,6 +18,7 @@ public class SamplesController(ApplicationDbContext context) : ControllerBase
     private Guid CurrentUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
     private bool IsOnlyTechnician() => User.IsInRole("Technician") && !User.IsInRole("Admin") && !User.IsInRole("Reviewer");
     private Task<bool> IsAssignedAsync(Guid projectId, Guid userId) => context.ProjectTechnicians.AnyAsync(pt => pt.ProjectId == projectId && pt.TechnicianId == userId);
+    private Task<Sample?> LoadSampleAsync(Guid id) => context.Samples.Include(s => s.Specimens).FirstOrDefaultAsync(s => s.Id == id);
 
     [HttpPost]
     [Authorize(Roles = Roles.Technician)]
@@ -112,10 +113,14 @@ public class SamplesController(ApplicationDbContext context) : ControllerBase
             .FirstOrDefaultAsync(s => s.Id == id);
 
         if (sample == null)
+        {
             return NotFound();
+        }
 
         if (IsOnlyTechnician() && !await IsAssignedAsync(sample.ProjectId, CurrentUserId()))
+        {
             return NotFound();
+        }
 
         return ToDto(sample);
     }
@@ -148,42 +153,101 @@ public class SamplesController(ApplicationDbContext context) : ControllerBase
     };
 
     [HttpPut("{sampleId:guid}/specimens/{specimenId:guid}/result")]
-[Authorize(Roles = Roles.Technician)]
-public async Task<ActionResult<SampleDto>> RecordResult(Guid sampleId, Guid specimenId, RecordSpecimenResultDto dto)
-{
-    var sample = await context.Samples
-        .Include(s => s.Specimens)
-        .FirstOrDefaultAsync(s => s.Id == sampleId);
+    [Authorize(Roles = Roles.Technician)]
+    public async Task<ActionResult<SampleDto>> RecordResult(Guid sampleId, Guid specimenId, RecordSpecimenResultDto dto)
+    {
+        var sample = await context.Samples.Include(s => s.Specimens).FirstOrDefaultAsync(s => s.Id == sampleId);
 
-    if (sample == null)
-        return NotFound(new { message = "Sample not found" });
+        if (sample == null)
+        {
+            return NotFound(new { message = "Sample not found" });
+        }
 
-    if (!await IsAssignedAsync(sample.ProjectId, CurrentUserId()))
-        return NotFound(new { message = "Sample not found" });
+        if (!await IsAssignedAsync(sample.ProjectId, CurrentUserId()))
+        {
+            return NotFound(new { message = "Sample not found" });
+        }
+            
+        if (sample.Status != SampleStatus.Draft && sample.Status != SampleStatus.Rejected)
+        {
+            return Conflict(new { message = $"Results cannot be entered while the sample is {sample.Status}." });
+        }
+            
+        var specimen = sample.Specimens.FirstOrDefault(sp => sp.Id == specimenId);
+        if (specimen == null)
+        {
+            return NotFound(new { message = "Specimen not found in this sample" });
+        }
+            
+        if (dto.MaxLoadLbf * 10 % 1 != 0)
+        {
+            return BadRequest(new { message = "Max load allows up to one decimal place." });
+        }
 
-    if (sample.Status != SampleStatus.Draft && sample.Status != SampleStatus.Rejected)
-        return Conflict(new { message = $"Results cannot be entered while the sample is {sample.Status}." });
+        if (dto.TestedAt > DateTimeOffset.UtcNow)
+        {
+            return BadRequest(new { message = "TestedAt cannot be in the future." });
+        }
+            
+        if (!StrengthCalculator.IsWithinTolerance(sample.SampledAt, specimen.Age, dto.TestedAt))
+        {
+            return BadRequest(new { message = $"Test is outside the tolerance window for a {(int)specimen.Age}-day specimen." });
+        }
+            
+        specimen.MaxLoadLbf = dto.MaxLoadLbf;
+        specimen.TestedAt = dto.TestedAt;
+        specimen.StrengthPsi = StrengthCalculator.CalculateStrengthPsi(specimen.DiameterIn, dto.MaxLoadLbf);
 
-    var specimen = sample.Specimens.FirstOrDefault(sp => sp.Id == specimenId);
-    if (specimen == null)
-        return NotFound(new { message = "Specimen not found in this sample" });
+        sample.Result = StrengthCalculator.CalculateResult(sample);
 
-    if (dto.MaxLoadLbf * 10 % 1 != 0)
-        return BadRequest(new { message = "Max load allows up to one decimal place." });
+        await context.SaveChangesAsync();
+        return ToDto(sample);
+    }
 
-    if (dto.TestedAt > DateTimeOffset.UtcNow)
-        return BadRequest(new { message = "TestedAt cannot be in the future." });
+    [HttpPost("{id:guid}/submit")]
+    [Authorize(Roles = Roles.Technician)]
+    public async Task<ActionResult<SampleDto>> Submit(Guid id)
+    {
+        var sample = await LoadSampleAsync(id);
+        if (sample == null || !await IsAssignedAsync(sample.ProjectId, CurrentUserId()))
+        {
+            return NotFound(new { message = "Sample not found" });
+        }
+            
+        if (sample.Status != SampleStatus.Draft && sample.Status != SampleStatus.Rejected)
+        {
+            return Conflict(new { message = $"Only Draft or Rejected samples can be submitted (current: {sample.Status})." });
+        }
+            
+        if (sample.Specimens.Any(sp => sp.StrengthPsi == null))
+        {
+            return Conflict(new { message = "All specimens (7-day and 28-day) must have results before submitting." });
+        }
+            
+        sample.Status = SampleStatus.Submitted;
+        await context.SaveChangesAsync();
+        return ToDto(sample);
+    }
 
-    if (!StrengthCalculator.IsWithinTolerance(sample.SampledAt, specimen.Age, dto.TestedAt))
-        return BadRequest(new { message = $"Test is outside the tolerance window for a {(int)specimen.Age}-day specimen." });
+    [HttpPost("{id:guid}/approve")]
+    [Authorize(Roles = Roles.Reviewer)]
+    public Task<ActionResult<SampleDto>> Approve(Guid id) => Review(id, SampleStatus.Approved);
 
-    specimen.MaxLoadLbf = dto.MaxLoadLbf;
-    specimen.TestedAt = dto.TestedAt;
-    specimen.StrengthPsi = StrengthCalculator.CalculateStrengthPsi(specimen.DiameterIn, dto.MaxLoadLbf);
+    [HttpPost("{id:guid}/reject")]
+    [Authorize(Roles = Roles.Reviewer)]
+    public Task<ActionResult<SampleDto>> Reject(Guid id) => Review(id, SampleStatus.Rejected);
 
-    sample.Result = StrengthCalculator.CalculateResult(sample);
+    private async Task<ActionResult<SampleDto>> Review(Guid id, SampleStatus newStatus)
+    {
+        var sample = await LoadSampleAsync(id);
+        if (sample == null)
+            return NotFound(new { message = "Sample not found" });
 
-    await context.SaveChangesAsync();
-    return ToDto(sample);
-}
+        if (sample.Status != SampleStatus.Submitted)
+            return Conflict(new { message = $"Only Submitted samples can be reviewed (current: {sample.Status})." });
+
+        sample.Status = newStatus;
+        await context.SaveChangesAsync();
+        return ToDto(sample);
+    }
 }
