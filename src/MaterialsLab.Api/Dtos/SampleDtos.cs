@@ -55,3 +55,12 @@ public record SpecimenDto
     public DateTimeOffset? TestedAt { get; init; }
     public int? StrengthPsi { get; init; }
 }
+
+public record RecordSpecimenResultDto
+{
+    [Range(typeof(decimal), "0.1", "99999999")]
+    public decimal MaxLoadLbf { get; init; }
+
+    [Required]
+    public DateTimeOffset TestedAt { get; init; }
+}

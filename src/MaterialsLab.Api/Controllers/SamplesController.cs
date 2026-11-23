@@ -1,6 +1,7 @@
 using MaterialsLab.Api.Data;
 using MaterialsLab.Api.Models;
 using MaterialsLab.Api.Dtos;
+using MaterialsLab.Api.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -145,4 +146,44 @@ public class SamplesController(ApplicationDbContext context) : ControllerBase
             })
             .ToList()
     };
+
+    [HttpPut("{sampleId:guid}/specimens/{specimenId:guid}/result")]
+[Authorize(Roles = Roles.Technician)]
+public async Task<ActionResult<SampleDto>> RecordResult(Guid sampleId, Guid specimenId, RecordSpecimenResultDto dto)
+{
+    var sample = await context.Samples
+        .Include(s => s.Specimens)
+        .FirstOrDefaultAsync(s => s.Id == sampleId);
+
+    if (sample == null)
+        return NotFound(new { message = "Sample not found" });
+
+    if (!await IsAssignedAsync(sample.ProjectId, CurrentUserId()))
+        return NotFound(new { message = "Sample not found" });
+
+    if (sample.Status != SampleStatus.Draft && sample.Status != SampleStatus.Rejected)
+        return Conflict(new { message = $"Results cannot be entered while the sample is {sample.Status}." });
+
+    var specimen = sample.Specimens.FirstOrDefault(sp => sp.Id == specimenId);
+    if (specimen == null)
+        return NotFound(new { message = "Specimen not found in this sample" });
+
+    if (dto.MaxLoadLbf * 10 % 1 != 0)
+        return BadRequest(new { message = "Max load allows up to one decimal place." });
+
+    if (dto.TestedAt > DateTimeOffset.UtcNow)
+        return BadRequest(new { message = "TestedAt cannot be in the future." });
+
+    if (!StrengthCalculator.IsWithinTolerance(sample.SampledAt, specimen.Age, dto.TestedAt))
+        return BadRequest(new { message = $"Test is outside the tolerance window for a {(int)specimen.Age}-day specimen." });
+
+    specimen.MaxLoadLbf = dto.MaxLoadLbf;
+    specimen.TestedAt = dto.TestedAt;
+    specimen.StrengthPsi = StrengthCalculator.CalculateStrengthPsi(specimen.DiameterIn, dto.MaxLoadLbf);
+
+    sample.Result = StrengthCalculator.CalculateResult(sample);
+
+    await context.SaveChangesAsync();
+    return ToDto(sample);
+}
 }
